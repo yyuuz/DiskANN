@@ -1201,10 +1201,37 @@ int PQFlashIndex<T, LabelT>::load_from_separate_paths(uint32_t num_threads, cons
 }
 
 #ifdef USE_BING_INFRA
-bool getNextCompletedRequest(std::shared_ptr<AlignedFileReader> &reader, IOContext &ctx, int &completedIndex)
+bool getNextCompletedRequest(const IOContext &ctx, size_t size, int &completedIndex)
 {
-    reader->wait(ctx, completedIndex);
-    return completedIndex != -1;
+    bool waitsRemaining = false;
+    long completeCount = ctx.m_completeCount;
+    do
+    {
+        for (int i = 0; i < size; i++)
+        {
+            auto ithStatus = (*ctx.m_pRequestsStatus)[i];
+            if (ithStatus == IOContext::Status::READ_SUCCESS)
+            {
+                completedIndex = i;
+                return true;
+            }
+            else if (ithStatus == IOContext::Status::READ_WAIT)
+            {
+                waitsRemaining = true;
+            }
+        }
+
+        // if we didn't find one in READ_SUCCESS, wait for one to complete.
+        if (waitsRemaining)
+        {
+            WaitOnAddress(&ctx.m_completeCount, &completeCount, sizeof(completeCount), 100);
+            // this assumes the knowledge of the reader behavior (implicit
+            // contract). need better factoring?
+        }
+    } while (waitsRemaining);
+
+    completedIndex = -1;
+    return false;
 }
 #endif
 
@@ -1244,8 +1271,21 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                                                  const bool use_filter, const LabelT &filter_label,
                                                  const uint32_t io_limit, const bool use_reorder_data,
                                                  QueryStats *stats)
-{
+/*参数说明：
 
+query1：查询向量。
+k_search：要搜索的最近邻数量。
+l_search：搜索列表的大小。
+indices：用于存储查询结果的索引数组。
+distances：用于存储查询结果的距离数组。
+beam_width：Beam 搜索的宽度。
+use_filter：是否使用过滤器。
+filter_label：过滤器的标签。
+io_limit：IO 限制。
+use_reorder_data：是否使用重新排序的数据。
+stats：查询统计信息。*/
+{
+    //首先，计算每个节点所占的扇区数，以确保 beam_width 不超过节点的最大读取扇区数的限制
     uint64_t num_sector_per_nodes = DIV_ROUND_UP(_max_node_len, defaults::SECTOR_LEN);
     if (beam_width > num_sector_per_nodes * defaults::MAX_N_SECTOR_READS)
         throw ANNException("Beamwidth can not be higher than defaults::MAX_N_SECTOR_READS", -1, __FUNCSIG__, __FILE__,
@@ -1270,6 +1310,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     // normalization step. for cosine, we simply normalize the query
     // for mips, we normalize the first d-1 dims, and add a 0 for last dim, since an extra coordinate was used to
     // convert MIPS to L2 search
+    //根据不同的距离度量对查询向量进行归一化处理，以便后续的距离计算。如果是内积或余弦距离，还会对查询向量进行单位化。
     if (metric == diskann::Metric::INNER_PRODUCT || metric == diskann::Metric::COSINE)
     {
         uint64_t inherent_dim = (metric == diskann::Metric::COSINE) ? this->_data_dim : (uint64_t)(this->_data_dim - 1);
@@ -1319,6 +1360,11 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     uint8_t *pq_coord_scratch = pq_query_scratch->aligned_pq_coord_scratch;
 
     // lambda to batch compute query<-> node distances in PQ space
+    /*
+    ids：一个指向查询向量或节点ID的指针数组，表示要计算距离的节点ID列表。
+    n_ids：一个无符号整数，表示节点ID列表的长度，即要计算距离的节点数量。
+    dists_out：一个指向浮点数的指针数组，用于存储计算得到的距离结果
+    */
     auto compute_dists = [this, pq_coord_scratch, pq_dists](const uint32_t *ids, const uint64_t n_ids,
                                                             float *dists_out) {
         diskann::aggregate_coords(ids, n_ids, this->data, this->_n_chunks, pq_coord_scratch);
@@ -1331,6 +1377,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     retset.reserve(l_search);
     std::vector<Neighbor> &full_retset = query_scratch->full_retset;
 
+    //确定当前最佳的中心节点，以便后续的近邻搜索过程。
     uint32_t best_medoid = 0;
     float best_dist = (std::numeric_limits<float>::max)();
     if (!use_filter)
@@ -1379,7 +1426,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
     uint32_t num_ios = 0;
 
     // cleared every iteration
-    std::vector<uint32_t> frontier;
+    std::vector<uint32_t> frontier;//frontier 用于存储前沿节点的ID
     frontier.reserve(2 * beam_width);
     std::vector<std::pair<uint32_t, char *>> frontier_nhoods;
     frontier_nhoods.reserve(2 * beam_width);
@@ -1422,6 +1469,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         }
 
         // read nhoods of frontier ids
+        //从磁盘中读取待探索节点的相邻节点信息
         if (!frontier.empty())
         {
             if (stats != nullptr)
@@ -1513,7 +1561,7 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
         long requestCount = static_cast<long>(frontier_read_reqs.size());
         // If we issued read requests and if a read is complete or there are
         // reads in wait state, then enter the while loop.
-        while (requestCount > 0 && getNextCompletedRequest(reader, ctx, completedIndex))
+        while (requestCount > 0 && getNextCompletedRequest(ctx, requestCount, completedIndex))
         {
             assert(completedIndex >= 0);
             auto &frontier_nhood = frontier_nhoods[completedIndex];
