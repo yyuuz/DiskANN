@@ -1265,6 +1265,8 @@ void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t
                        use_reorder_data, stats);
 }
 
+uint64_t Get_beam_width()
+
 template <typename T, typename LabelT>
 void PQFlashIndex<T, LabelT>::cached_beam_search(const T *query1, const uint64_t k_search, const uint64_t l_search,
                                                  uint64_t *indices, float *distances, const uint64_t beam_width,
@@ -1285,6 +1287,8 @@ io_limit：IO 限制。
 use_reorder_data：是否使用重新排序的数据。
 stats：查询统计信息。*/
 {
+    uint64_t beam_width_cur=1;
+    float lnw=log(beam_width);
     //首先，计算每个节点所占的扇区数，以确保 beam_width 不超过节点的最大读取扇区数的限制
     uint64_t num_sector_per_nodes = DIV_ROUND_UP(_max_node_len, defaults::SECTOR_LEN);
     if (beam_width > num_sector_per_nodes * defaults::MAX_N_SECTOR_READS)
@@ -1418,6 +1422,7 @@ stats：查询统计信息。*/
     }
 
     compute_dists(&best_medoid, 1, dist_scratch);
+    float dist_max=dist_scratch[0];
     retset.insert(Neighbor(best_medoid, dist_scratch[0]));
     visited.insert(best_medoid);
 
@@ -1445,7 +1450,9 @@ stats：查询统计信息。*/
         sector_scratch_idx = 0;
         // find new beam
         uint32_t num_seen = 0;
-        while (retset.has_unexpanded_node() && frontier.size() < beam_width && num_seen < beam_width)
+        
+        
+        while (retset.has_unexpanded_node() && frontier.size() < beam_width_cur && num_seen < beam_width_cur)
         {
             auto nbr = retset.closest_unexpanded();
             num_seen++;
@@ -1466,6 +1473,15 @@ stats：查询统计信息。*/
             {
                 reinterpret_cast<std::atomic<uint32_t> &>(this->_node_visit_counter[nbr.id].second).fetch_add(1);
             }
+        }
+
+        //更新beam_width_cur
+        if(!frontier.empty())
+        {
+            auto id = frontier[i];
+            compute_dists(&id, 1, dist_scratch);
+            float dist_cur=dists_out[0];
+            beam_width_cur=exp(dist_cur*lnw/dist_max);
         }
 
         // read nhoods of frontier ids
