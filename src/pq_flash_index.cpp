@@ -207,7 +207,7 @@ template <typename T, typename LabelT> void PQFlashIndex<T, LabelT>::load_cache_
 
     // borrow thread data
     ScratchStoreManager<SSDThreadData<T>> manager(this->_thread_data);
-    auto this_thread_data = manager.scratch_space();
+    auto this_thread_data = manager.scratch_space(); 
     IOContext &ctx = this_thread_data->ctx;
 
     // Allocate space for neighborhood cache
@@ -1431,13 +1431,13 @@ stats：查询统计信息。*/
     uint32_t num_ios = 0;
 
     // cleared every iteration
-    std::vector<uint32_t> frontier;//frontier 用于存储前沿节点的ID
+    std::vector<uint32_t> frontier;//frontier 用于存储未命中前沿节点的ID
     frontier.reserve(2 * beam_width);
-    std::vector<std::pair<uint32_t, char *>> frontier_nhoods;
+    std::vector<std::pair<uint32_t, char *>> frontier_nhoods;//pair
     frontier_nhoods.reserve(2 * beam_width);
     std::vector<AlignedRead> frontier_read_reqs;
     frontier_read_reqs.reserve(2 * beam_width);
-    std::vector<std::pair<uint32_t, std::pair<uint32_t, uint32_t *>>> cached_nhoods;
+    std::vector<std::pair<uint32_t, std::pair<uint32_t, uint32_t *>>> cached_nhoods;//cache命中的节点
     cached_nhoods.reserve(2 * beam_width);
 
     while (retset.has_unexpanded_node() && num_ios < io_limit)
@@ -1456,7 +1456,7 @@ stats：查询统计信息。*/
         {
             auto nbr = retset.closest_unexpanded();
             num_seen++;
-            auto iter = _nhood_cache.find(nbr.id);
+            auto iter = _nhood_cache.find(nbr.id);//在cache中寻找
             if (iter != _nhood_cache.end())
             {
                 cached_nhoods.push_back(std::make_pair(nbr.id, iter->second));
@@ -1495,11 +1495,11 @@ stats：查询统计信息。*/
                 auto id = frontier[i];
                 std::pair<uint32_t, char *> fnhood;
                 fnhood.first = id;
-                fnhood.second = sector_scratch + num_sectors_per_node * sector_scratch_idx * defaults::SECTOR_LEN;
+                fnhood.second = sector_scratch + num_sectors_per_node * sector_scratch_idx * defaults::SECTOR_LEN;//每个节点的相邻节点信息就会被存储在 sector_scratch 的不同部分
                 sector_scratch_idx++;
                 frontier_nhoods.push_back(fnhood);
                 frontier_read_reqs.emplace_back(get_node_sector((size_t)id) * defaults::SECTOR_LEN,
-                                                num_sectors_per_node * defaults::SECTOR_LEN, fnhood.second);
+                                                num_sectors_per_node * defaults::SECTOR_LEN, fnhood.second);//从哪个字节开始读取数据，读多少字节，数据将被存储的位置
                 if (stats != nullptr)
                 {
                     stats->n_4k++;
@@ -1520,7 +1520,7 @@ stats：查询统计信息。*/
             }
         }
 
-        // process cached nhoods
+        // process cached nhoods计算cache中节点的距离以及其邻居的距离
         for (auto &cached_nhood : cached_nhoods)
         {
             auto global_cache_iter = _coord_cache.find(cached_nhood.first);
